@@ -22,7 +22,7 @@
 #   warm_up_hours: don't evaluate pacing until this many hours into the month.
 #       Prevents noisy false positives from single early transactions.
 
-budget_id: "your-budget-id-here"
+budget_id: "${YNAB_BUDGET_ID}"
 
 categories:
   Groceries:

@@ -10,7 +10,7 @@ import sys
 from datetime import datetime, timezone, timedelta
 
 # Stub env vars before importing alerts (they're read at module level)
-for key in ("YNAB_TOKEN", "PUSHOVER_API_TOKEN", "PUSHOVER_USER_KEYS", "GITHUB_TOKEN", "GITHUB_REPOSITORY"):
+for key in ("YNAB_TOKEN", "YNAB_BUDGET_ID", "PUSHOVER_API_TOKEN", "PUSHOVER_USER_KEYS", "GITHUB_TOKEN", "GITHUB_REPOSITORY"):
     os.environ.setdefault(key, "test-stub")
 
 from alerts import (

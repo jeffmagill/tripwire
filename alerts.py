@@ -31,9 +31,34 @@ log = logging.getLogger("tripwire")
 # Config & env
 # ---------------------------------------------------------------------------
 
+def expand_env_vars(value):
+    """
+    Recursively expand ${VAR} or $VAR environment variable references.
+    Works on strings, lists, and dicts.
+    """
+    if isinstance(value, str):
+        import re
+        # Match ${VAR} or $VAR (word characters only for $VAR)
+        pattern = r'\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)'
+        def replacer(match):
+            var_name = match.group(1) or match.group(2)
+            env_value = os.environ.get(var_name)
+            if env_value is None:
+                raise ValueError(f"Environment variable '{var_name}' not set (referenced in config)")
+            return env_value
+        return re.sub(pattern, replacer, value)
+    elif isinstance(value, dict):
+        return {k: expand_env_vars(v) for k, v in value.items()}
+    elif isinstance(value, list):
+        return [expand_env_vars(item) for item in value]
+    else:
+        return value
+
+
 def load_config(path: str = "config.yaml") -> dict:
     with open(path) as f:
-        return yaml.safe_load(f)
+        raw = yaml.safe_load(f)
+    return expand_env_vars(raw)
 
 
 YNAB_TOKEN = os.environ["YNAB_TOKEN"]

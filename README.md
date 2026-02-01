@@ -31,6 +31,7 @@ Go to your repo → Settings → Secrets and Variables → Actions. Add:
 | Secret | Value |
 |---|---|
 | `YNAB_TOKEN` | Your YNAB personal access token (Settings → Developer Settings in YNAB) |
+| `YNAB_BUDGET_ID` | Your YNAB budget ID (see step 3 below for how to find this) |
 | `PUSHOVER_API_TOKEN` | Your Pushover application token |
 | `PUSHOVER_USER_KEYS` | Comma-separated Pushover user keys, e.g. `key1,key2` |
 
@@ -38,8 +39,22 @@ Go to your repo → Settings → Secrets and Variables → Actions. Add:
 
 ### 3. Edit `config.yaml`
 
-Replace the placeholder `budget_id` and `goal_id` values with your own. You
-can find your budget ID and category IDs via the YNAB API:
+The `budget_id` field uses environment variable substitution — the default
+`"${YNAB_BUDGET_ID}"` will be replaced at runtime with the value from your
+repository secret. **You don't need to change this unless you want to hardcode
+the ID directly.**
+
+You can also use environment variables for category IDs if you prefer:
+
+```yaml
+categories:
+  Groceries:
+    goal_id: "${YNAB_GROCERIES_ID}"  # reads from environment
+  Dining Out:
+    goal_id: "abc-123-def-456"        # or hardcode directly
+```
+
+To find your budget ID and category IDs, use the YNAB API:
 
 ```bash
 # List budgets
@@ -48,6 +63,8 @@ curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets
 # List categories for a budget
 curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets/YOUR_BUDGET_ID/categories
 ```
+
+Environment variable syntax supports both `${VAR}` and `$VAR` formats.
 
 ### 4. Push and wait
 
@@ -82,6 +99,13 @@ The `warm_up_hours` field on `pacing` rules prevents false positives early in
 the month. A single large transaction on day 1 would otherwise look like a
 catastrophic overspend projection. Setting `warm_up_hours: 72` means pacing
 rules don't evaluate until day 3.
+
+## Workflow failure notifications
+
+If the GitHub Actions workflow fails (tests fail, runtime errors, etc.), you'll
+receive an urgent Pushover notification with a direct link to the failed run.
+This uses the same `PUSHOVER_API_TOKEN` and `PUSHOVER_USER_KEYS` configured for
+budget alerts.
 
 ## Rule types
 
