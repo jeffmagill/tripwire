@@ -1,0 +1,61 @@
+# ynab-alerts config
+# ---------------------
+# Each category block maps to a category in your YNAB budget.
+# goal_id: the YNAB category ID (grab from YNAB API or URL when viewing the category)
+# enabled: set to false to skip the category entirely
+# rules: list of alert rules. Each rule has:
+#   type: goal_threshold | historical_average | pacing (pacing and historical_average TBD)
+#   triggers: list of threshold + severity pairs
+#     at: threshold expression
+#           "$X"  = alert when dollars remaining drops to X or below
+#           "X%"  = alert when percentage of goal spent reaches X or above
+#     severity: warning | urgent
+#   once_per_trigger: if true, each trigger fires at most once per month
+
+budget_id: "your-budget-id-here"
+
+categories:
+  Groceries:
+    goal_id: "your-category-id-here"
+    enabled: true
+    rules:
+      - type: goal_threshold
+        triggers:
+          - at: "75%"
+            severity: warning
+          - at: "90%"
+            severity: urgent
+        once_per_trigger: true
+
+  Dining Out:
+    goal_id: "your-category-id-here"
+    enabled: true
+    rules:
+      - type: goal_threshold
+        triggers:
+          - at: "80%"
+            severity: warning
+          - at: "95%"
+            severity: urgent
+        once_per_trigger: true
+
+  Car Maintenance:
+    goal_id: "your-category-id-here"
+    enabled: true
+    rules:
+      - type: goal_threshold
+        triggers:
+          - at: "$200 remaining"
+            severity: warning
+        once_per_trigger: true
+
+  # Example: category with alerts disabled this month
+  Vacation:
+    goal_id: "your-category-id-here"
+    enabled: false
+    rules:
+      - type: goal_threshold
+        triggers:
+          - at: "80%"
+            severity: warning
+        once_per_trigger: true
