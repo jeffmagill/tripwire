@@ -52,14 +52,3 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITHUB_REPOSITORY: ${{ github.repository }}
         run: python alerts.py
-
-      - name: Notify on failure
-        if: failure()
-        uses: actions/slack-notify@v1
-        with:
-          # This step is a placeholder — see README for how to wire up
-          # failure notifications via Pushover or email. The key point is
-          # that this step only runs on failure (if: failure()), so a
-          # crashed run doesn't silently disappear.
-          status: "failure"
-        continue-on-error: true          # don't let the notify step itself break the workflow
