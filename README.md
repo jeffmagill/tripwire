@@ -64,7 +64,7 @@ curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets
 curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets/YOUR_BUDGET_ID/categories
 ```
 
-Environment variable syntax supports both `${VAR}` and `$VAR` formats.
+Environment variable syntax: use `${VAR}` format (bare `$VAR` is not supported to avoid conflicts with dollar amounts in threshold expressions).
 
 ### 4. Push and wait
 

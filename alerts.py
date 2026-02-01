@@ -33,15 +33,16 @@ log = logging.getLogger("tripwire")
 
 def expand_env_vars(value):
     """
-    Recursively expand ${VAR} or $VAR environment variable references.
+    Recursively expand ${VAR} environment variable references.
     Works on strings, lists, and dicts.
+    Only supports ${VAR} syntax (not bare $VAR) to avoid conflicts with dollar amounts.
     """
     if isinstance(value, str):
         import re
-        # Match ${VAR} or $VAR (word characters only for $VAR)
-        pattern = r'\$\{([A-Za-z0-9_]+)\}|\$([A-Za-z0-9_]+)'
+        # Match ${VAR} only (not bare $VAR, to avoid matching dollar amounts like $200)
+        pattern = r'\$\{([A-Za-z0-9_]+)\}'
         def replacer(match):
-            var_name = match.group(1) or match.group(2)
+            var_name = match.group(1)
             env_value = os.environ.get(var_name)
             if env_value is None:
                 raise ValueError(f"Environment variable '{var_name}' not set (referenced in config)")
