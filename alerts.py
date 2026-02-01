@@ -4,6 +4,7 @@ import json
 import calendar
 from datetime import datetime, timezone, timedelta
 from typing import Any
+from dataclasses import dataclass, field
 
 import requests
 import yaml
@@ -28,6 +29,19 @@ STATE_BRANCH = "state"
 STATE_FILE = "state.json"
 
 YNAB_BASE = "https://api.ynab.com/v1"
+
+
+# ---------------------------------------------------------------------------
+# Data types
+# ---------------------------------------------------------------------------
+
+@dataclass
+class Firing:
+    """A single trigger that fired. Carries everything needed to send the alert."""
+    category_name: str
+    trigger: dict                      # the trigger block from config, e.g. {at: "75%", severity: "warning"}
+    ynab_category: dict                # raw YNAB category object
+    pacing_context: dict = field(default_factory=dict)  # populated only for pacing rules
 
 
 # ---------------------------------------------------------------------------
@@ -93,34 +107,40 @@ def get_state_sha() -> str | None:
     return r.json()["sha"]
 
 
-def current_month_key() -> str:
-    """e.g. '2026-01'"""
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+def current_month_key(now: datetime | None = None) -> str:
+    """e.g. '2026-01'. Accepts an optional now for testability."""
+    if now is None:
+        now = datetime.now(timezone.utc)
+    return now.strftime("%Y-%m")
 
 
-def should_alert(state: dict, category_name: str, trigger_key: str, min_hours: int) -> bool:
+def should_alert(state: dict, category_name: str, trigger_key: str, min_hours: int, now: datetime | None = None) -> bool:
     """
     Returns True if enough time has passed since the last firing of this trigger
     to warrant a new alert. Also returns True if the trigger has never fired.
     """
-    month = current_month_key()
+    if now is None:
+        now = datetime.now(timezone.utc)
+    month = current_month_key(now)
     last_fired_str = state.get("fired", {}).get(month, {}).get(f"{category_name}:{trigger_key}")
     if last_fired_str is None:
         return True  # never fired this month
     last_fired = datetime.fromisoformat(last_fired_str)
-    return (datetime.now(timezone.utc) - last_fired) >= timedelta(hours=min_hours)
+    return (now - last_fired) >= timedelta(hours=min_hours)
 
 
-def record_firing(state: dict, category_name: str, trigger_key: str) -> None:
+def record_firing(state: dict, category_name: str, trigger_key: str, now: datetime | None = None) -> None:
     """Record the current timestamp as the most recent firing for this trigger."""
-    month = current_month_key()
+    if now is None:
+        now = datetime.now(timezone.utc)
+    month = current_month_key(now)
     state.setdefault("fired", {}).setdefault(month, {})
-    state["fired"][month][f"{category_name}:{trigger_key}"] = datetime.now(timezone.utc).isoformat()
+    state["fired"][month][f"{category_name}:{trigger_key}"] = now.isoformat()
 
 
-def prune_old_months(state: dict) -> None:
+def prune_old_months(state: dict, now: datetime | None = None) -> None:
     """Remove fired entries older than the current month."""
-    month = current_month_key()
+    month = current_month_key(now)
     fired = state.get("fired", {})
     for k in [k for k in fired if k < month]:
         del fired[k]
@@ -173,7 +193,7 @@ def parse_threshold(at_value: str) -> tuple[str, float]:
 
 
 # ---------------------------------------------------------------------------
-# Rule evaluation
+# Low-level rule evaluation (pure functions, no state, no side effects)
 # ---------------------------------------------------------------------------
 
 def milliunits_to_dollars(mu: int) -> float:
@@ -223,7 +243,6 @@ def evaluate_pacing(category: dict, trigger: dict, now: datetime) -> tuple[bool,
 
     year, month = now.year, now.month
     days_in_month = calendar.monthrange(year, month)[1]
-    # days_elapsed: how far into the month we are (at least 1 to avoid div-by-zero)
     days_elapsed = max(now.day, 1)
 
     expected_spend = goal_target * (days_elapsed / days_in_month)
@@ -244,16 +263,143 @@ def evaluate_pacing(category: dict, trigger: dict, now: datetime) -> tuple[bool,
     if threshold_type != "percent_over":
         raise ValueError(f"Pacing rule trigger must use 'X% over' syntax, got: '{trigger['at']}'")
 
-    # Only fire if we're actually projected over AND by at least the threshold
     return (percent_over >= threshold_value, context)
+
+
+# ---------------------------------------------------------------------------
+# Rule-level evaluation (one function per rule type)
+# Each owns: warm-up guard, trigger iteration, cooldown check.
+# Returns a list of Firing objects — empty if nothing tripped.
+# ---------------------------------------------------------------------------
+
+def evaluate_goal_threshold_rule(
+    category_name: str,
+    rule: dict,
+    ynab_category: dict,
+    state: dict,
+    now: datetime,
+) -> list[Firing]:
+    """Evaluate a goal_threshold rule against a YNAB category. Returns all firings."""
+    min_hours = rule.get("min_hours_between_alerts", 744)
+    firings = []
+
+    for trigger in rule.get("triggers", []):
+        trigger_key = trigger["at"]
+
+        if not should_alert(state, category_name, trigger_key, min_hours, now):
+            print(f"SKIP (cooldown): {category_name} — {trigger_key}")
+            continue
+
+        if evaluate_goal_threshold(ynab_category, trigger):
+            firings.append(Firing(
+                category_name=category_name,
+                trigger=trigger,
+                ynab_category=ynab_category,
+            ))
+
+    return firings
+
+
+def evaluate_pacing_rule(
+    category_name: str,
+    rule: dict,
+    ynab_category: dict,
+    state: dict,
+    now: datetime,
+    hours_into_month: float,
+) -> list[Firing]:
+    """Evaluate a pacing rule against a YNAB category. Returns all firings."""
+    # Warm-up guard
+    warm_up = rule.get("warm_up_hours", 72)
+    if hours_into_month < warm_up:
+        print(f"SKIP (warm-up): {category_name} pacing — {hours_into_month:.1f}h into month, warm_up_hours={warm_up}")
+        return []
+
+    min_hours = rule.get("min_hours_between_alerts", 24)
+    firings = []
+
+    for trigger in rule.get("triggers", []):
+        trigger_key = trigger["at"]
+
+        if not should_alert(state, category_name, trigger_key, min_hours, now):
+            print(f"SKIP (cooldown): {category_name} — {trigger_key}")
+            continue
+
+        fired, pacing_context = evaluate_pacing(ynab_category, trigger, now)
+        if fired:
+            firings.append(Firing(
+                category_name=category_name,
+                trigger=trigger,
+                ynab_category=ynab_category,
+                pacing_context=pacing_context,
+            ))
+
+    return firings
+
+
+# ---------------------------------------------------------------------------
+# Category-level evaluation (dispatcher)
+# ---------------------------------------------------------------------------
+
+RULE_EVALUATORS = {
+    "goal_threshold": evaluate_goal_threshold_rule,
+    "pacing":         evaluate_pacing_rule,
+}
+
+
+def evaluate_category(
+    category_name: str,
+    cat_config: dict,
+    ynab_category: dict,
+    state: dict,
+    now: datetime,
+) -> list[Firing]:
+    """
+    Evaluate all rules for a single category. Returns a flat list of all Firings
+    across all rules. Skips disabled categories and unknown rule types.
+    """
+    if not cat_config.get("enabled", True):
+        return []
+
+    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
+    hours_into_month = (now - month_start).total_seconds() / 3600
+
+    firings = []
+
+    for rule in cat_config.get("rules", []):
+        rule_type = rule["type"]
+        evaluator = RULE_EVALUATORS.get(rule_type)
+
+        if evaluator is None:
+            print(f"SKIP (unknown rule type): {category_name} — {rule_type}")
+            continue
+
+        # goal_threshold and pacing have slightly different signatures;
+        # pacing needs hours_into_month. We pass it via kwargs so the
+        # dispatch stays clean.
+        kwargs: dict[str, Any] = dict(
+            category_name=category_name,
+            rule=rule,
+            ynab_category=ynab_category,
+            state=state,
+            now=now,
+        )
+        if rule_type == "pacing":
+            kwargs["hours_into_month"] = hours_into_month
+
+        firings.extend(evaluator(**kwargs))
+
+    return firings
 
 
 # ---------------------------------------------------------------------------
 # Pushover notifications
 # ---------------------------------------------------------------------------
 
-def send_alert(category_name: str, trigger: dict, category: dict, pacing_context: dict | None = None) -> None:
+def send_alert(firing: Firing) -> None:
     """Send a Pushover notification to all configured user keys."""
+    category = firing.ynab_category
+    trigger = firing.trigger
     goal_target = category.get("goal_target", 0)
     activity = category.get("activity", 0)
     balance = category.get("balance", 0)
@@ -264,13 +410,12 @@ def send_alert(category_name: str, trigger: dict, category: dict, pacing_context
     remaining_str = f"${milliunits_to_dollars(balance):.2f}"
     percent_str = f"{(activity / goal_target * 100):.0f}%" if goal_target else "N/A"
 
-    title = f"{'⚠️' if severity == 'warning' else '🔴'} Tripwire: {category_name}"
+    title = f"{'⚠️' if severity == 'warning' else '🔴'} Tripwire: {firing.category_name}"
 
-    if pacing_context:
-        # Pacing-specific message: show current spend, expected spend, and projection
-        expected_str = f"${milliunits_to_dollars(pacing_context['expected_spend']):.2f}"
-        projected_str = f"${milliunits_to_dollars(pacing_context['projected_eom']):.2f}"
-        over_str = f"{pacing_context['percent_over']:.1f}%"
+    if firing.pacing_context:
+        expected_str = f"${milliunits_to_dollars(firing.pacing_context['expected_spend']):.2f}"
+        projected_str = f"${milliunits_to_dollars(firing.pacing_context['projected_eom']):.2f}"
+        over_str = f"{firing.pacing_context['percent_over']:.1f}%"
         message = (
             f"On pace to overspend.\n"
             f"Spent: {spent_str} (expected by now: {expected_str})\n"
@@ -278,14 +423,12 @@ def send_alert(category_name: str, trigger: dict, category: dict, pacing_context
             f"Trigger: {trigger['at']} [{severity}]"
         )
     else:
-        # Goal threshold message
         message = (
             f"Spent {spent_str} of {goal_str} ({percent_str})\n"
             f"Remaining: {remaining_str}\n"
             f"Trigger: {trigger['at']} [{severity}]"
         )
 
-    # Pushover priority: -1 = low (warning), 1 = high (urgent)
     priority = -1 if severity == "warning" else 1
 
     for user_key in PUSHOVER_USER_KEYS:
@@ -317,62 +460,24 @@ def main():
     # Load state
     state = load_state()
     state_sha = get_state_sha()
-    prune_old_months(state)
+    prune_old_months(state, now)
     state_dirty = False
 
-    # Hours elapsed since the start of this month (for warm_up_hours check)
-    month_start = datetime(now.year, now.month, 1, tzinfo=timezone.utc)
-    hours_into_month = (now - month_start).total_seconds() / 3600
-
-    # Evaluate each configured category
+    # Evaluate and act
     for cat_name, cat_config in config["categories"].items():
-        if not cat_config.get("enabled", True):
-            continue
-
         goal_id = cat_config["goal_id"]
         ynab_category = cat_map.get(goal_id)
         if ynab_category is None:
             print(f"WARNING: category '{cat_name}' (id: {goal_id}) not found in YNAB for {month_str}")
             continue
 
-        for rule in cat_config.get("rules", []):
-            rule_type = rule["type"]
-            min_hours = rule.get("min_hours_between_alerts", 744)
+        firings = evaluate_category(cat_name, cat_config, ynab_category, state, now)
 
-            # Pacing warm-up guard
-            if rule_type == "pacing":
-                warm_up = rule.get("warm_up_hours", 72)
-                if hours_into_month < warm_up:
-                    print(f"SKIP (warm-up): {cat_name} pacing — {hours_into_month:.1f}h into month, warm_up_hours={warm_up}")
-                    continue
-
-            for trigger in rule.get("triggers", []):
-                trigger_key = trigger["at"]
-
-                # Check min_hours_between_alerts
-                if not should_alert(state, cat_name, trigger_key, min_hours):
-                    print(f"SKIP (cooldown): {cat_name} — {trigger_key}")
-                    continue
-
-                # Evaluate by rule type
-                fired = False
-                pacing_context = None
-
-                if rule_type == "goal_threshold":
-                    fired = evaluate_goal_threshold(ynab_category, trigger)
-
-                elif rule_type == "pacing":
-                    fired, pacing_context = evaluate_pacing(ynab_category, trigger, now)
-
-                else:
-                    print(f"SKIP (unknown rule type): {cat_name} — {rule_type}")
-                    continue
-
-                if fired:
-                    print(f"FIRED: {cat_name} — {trigger_key} [{trigger.get('severity', 'warning')}]")
-                    send_alert(cat_name, trigger, ynab_category, pacing_context)
-                    record_firing(state, cat_name, trigger_key)
-                    state_dirty = True
+        for firing in firings:
+            print(f"FIRED: {firing.category_name} — {firing.trigger['at']} [{firing.trigger.get('severity', 'warning')}]")
+            send_alert(firing)
+            record_firing(state, firing.category_name, firing.trigger["at"], now)
+            state_dirty = True
 
     # Persist state if anything changed
     if state_dirty:
