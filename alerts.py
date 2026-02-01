@@ -1,6 +1,7 @@
 import os
 import re
 import json
+import logging
 import calendar
 from datetime import datetime, timezone, timedelta
 from typing import Any
@@ -8,6 +9,22 @@ from dataclasses import dataclass, field
 
 import requests
 import yaml
+
+# ---------------------------------------------------------------------------
+# Logging
+# ---------------------------------------------------------------------------
+# Format: timestamp [LEVEL] message
+# All output goes to stderr (Actions captures both stdout and stderr in the
+# log, but stderr is the conventional home for diagnostics).
+# ---------------------------------------------------------------------------
+
+logging.basicConfig(
+    level=logging.DEBUG,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S UTC",
+    stream=__import__("sys").stderr,
+)
+log = logging.getLogger("tripwire")
 
 
 # ---------------------------------------------------------------------------
@@ -74,10 +91,15 @@ def load_state() -> dict:
     url = f"https://api.github.com/repos/{GITHUB_REPO}/contents/{STATE_FILE}?ref={STATE_BRANCH}"
     r = requests.get(url, headers=_github_headers())
     if r.status_code == 404:
+        log.info("State file not found on '%s' branch — starting fresh", STATE_BRANCH)
         return {}
     r.raise_for_status()
     raw = base64.b64decode(r.json()["content"]).decode()
-    return json.loads(raw)
+    state = json.loads(raw)
+    log.debug("Loaded state: %d month(s), %d total firings",
+              len(state.get("fired", {})),
+              sum(len(v) for v in state.get("fired", {}).values()))
+    return state
 
 
 def save_state(state: dict, old_sha: str | None) -> None:
@@ -95,6 +117,7 @@ def save_state(state: dict, old_sha: str | None) -> None:
     else:
         r = requests.post(url, headers=_github_headers(), json=payload)
     r.raise_for_status()
+    log.info("State saved to '%s' branch (sha: %s)", STATE_BRANCH, r.json().get("content", {}).get("sha", "?"))
 
 
 def get_state_sha() -> str | None:
@@ -142,8 +165,11 @@ def prune_old_months(state: dict, now: datetime | None = None) -> None:
     """Remove fired entries older than the current month."""
     month = current_month_key(now)
     fired = state.get("fired", {})
-    for k in [k for k in fired if k < month]:
+    old_keys = [k for k in fired if k < month]
+    for k in old_keys:
         del fired[k]
+    if old_keys:
+        log.debug("Pruned stale state for months: %s", ", ".join(old_keys))
 
 
 # ---------------------------------------------------------------------------
@@ -154,9 +180,12 @@ def fetch_categories(budget_id: str, month: str) -> list[dict]:
     """Fetch all categories for a given budget and month."""
     url = f"{YNAB_BASE}/budgets/{budget_id}/months/{month}/categories"
     headers = {"Authorization": f"Bearer {YNAB_TOKEN}"}
+    log.debug("Fetching categories: %s", url)
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-    return r.json()["data"]["categories"]
+    categories = r.json()["data"]["categories"]
+    log.info("Fetched %d categories from YNAB for %s", len(categories), month)
+    return categories
 
 
 def build_category_map(categories: list[dict]) -> dict[str, dict]:
@@ -287,7 +316,7 @@ def evaluate_goal_threshold_rule(
         trigger_key = trigger["at"]
 
         if not should_alert(state, category_name, trigger_key, min_hours, now):
-            print(f"SKIP (cooldown): {category_name} — {trigger_key}")
+            log.debug("SKIP (cooldown): %s — %s", category_name, trigger_key)
             continue
 
         if evaluate_goal_threshold(ynab_category, trigger):
@@ -296,6 +325,8 @@ def evaluate_goal_threshold_rule(
                 trigger=trigger,
                 ynab_category=ynab_category,
             ))
+        else:
+            log.debug("EVAL (not tripped): %s — %s", category_name, trigger_key)
 
     return firings
 
@@ -312,7 +343,8 @@ def evaluate_pacing_rule(
     # Warm-up guard
     warm_up = rule.get("warm_up_hours", 72)
     if hours_into_month < warm_up:
-        print(f"SKIP (warm-up): {category_name} pacing — {hours_into_month:.1f}h into month, warm_up_hours={warm_up}")
+        log.debug("SKIP (warm-up): %s pacing — %.1fh into month, warm_up_hours=%s",
+                  category_name, hours_into_month, warm_up)
         return []
 
     min_hours = rule.get("min_hours_between_alerts", 24)
@@ -322,7 +354,7 @@ def evaluate_pacing_rule(
         trigger_key = trigger["at"]
 
         if not should_alert(state, category_name, trigger_key, min_hours, now):
-            print(f"SKIP (cooldown): {category_name} — {trigger_key}")
+            log.debug("SKIP (cooldown): %s — %s", category_name, trigger_key)
             continue
 
         fired, pacing_context = evaluate_pacing(ynab_category, trigger, now)
@@ -333,6 +365,9 @@ def evaluate_pacing_rule(
                 ynab_category=ynab_category,
                 pacing_context=pacing_context,
             ))
+        else:
+            log.debug("EVAL (not tripped): %s — %s (projected %.1f%% over)",
+                      category_name, trigger_key, pacing_context.get("percent_over", 0))
 
     return firings
 
@@ -371,7 +406,7 @@ def evaluate_category(
         evaluator = RULE_EVALUATORS.get(rule_type)
 
         if evaluator is None:
-            print(f"SKIP (unknown rule type): {category_name} — {rule_type}")
+            log.warning("SKIP (unknown rule type): %s — %s", category_name, rule_type)
             continue
 
         # goal_threshold and pacing have slightly different signatures;
@@ -431,6 +466,10 @@ def send_alert(firing: Firing) -> None:
 
     priority = -1 if severity == "warning" else 1
 
+    log.info("Sending alert to %d recipient(s): %s — %s [%s]",
+             len(PUSHOVER_USER_KEYS), firing.category_name, trigger["at"], severity)
+    log.debug("Alert payload — title: %s | message: %s", title, message)
+
     for user_key in PUSHOVER_USER_KEYS:
         payload = {
             "token": PUSHOVER_API_TOKEN,
@@ -441,6 +480,7 @@ def send_alert(firing: Firing) -> None:
         }
         r = requests.post("https://api.pushover.net/1/messages.json", data=payload)
         r.raise_for_status()
+        log.debug("Pushover delivery OK for user key ending '...%s'", user_key[-4:])
 
 
 # ---------------------------------------------------------------------------
@@ -453,6 +493,9 @@ def main():
     now = datetime.now(timezone.utc)
     month_str = now.strftime("%Y-%m-01")  # YNAB expects YYYY-MM-01
 
+    log.info("--- Tripwire run started at %s for %s ---", now.isoformat(), month_str)
+    log.debug("Budget ID: %s | Categories configured: %d", budget_id, len(config["categories"]))
+
     # Fetch YNAB data
     categories = fetch_categories(budget_id, month_str)
     cat_map = build_category_map(categories)
@@ -462,29 +505,36 @@ def main():
     state_sha = get_state_sha()
     prune_old_months(state, now)
     state_dirty = False
+    total_firings = 0
 
     # Evaluate and act
     for cat_name, cat_config in config["categories"].items():
+        if not cat_config.get("enabled", True):
+            log.debug("SKIP (disabled): %s", cat_name)
+            continue
+
         goal_id = cat_config["goal_id"]
         ynab_category = cat_map.get(goal_id)
         if ynab_category is None:
-            print(f"WARNING: category '{cat_name}' (id: {goal_id}) not found in YNAB for {month_str}")
+            log.warning("Category '%s' (goal_id: %s) not found in YNAB for %s — skipping", cat_name, goal_id, month_str)
             continue
 
         firings = evaluate_category(cat_name, cat_config, ynab_category, state, now)
 
         for firing in firings:
-            print(f"FIRED: {firing.category_name} — {firing.trigger['at']} [{firing.trigger.get('severity', 'warning')}]")
+            log.info("FIRED: %s — %s [%s]", firing.category_name, firing.trigger["at"], firing.trigger.get("severity", "warning"))
             send_alert(firing)
             record_firing(state, firing.category_name, firing.trigger["at"], now)
             state_dirty = True
+            total_firings += 1
 
     # Persist state if anything changed
     if state_dirty:
         save_state(state, state_sha)
-        print("State updated on branch: state")
     else:
-        print("No state changes.")
+        log.debug("No state changes this run.")
+
+    log.info("--- Tripwire run complete: %d firing(s) ---", total_firings)
 
 
 if __name__ == "__main__":
