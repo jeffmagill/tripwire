@@ -1,0 +1,65 @@
+name: Tripwire
+
+on:
+  schedule:
+    - cron: "0 0,4,8,12,16,20 * * *"   # every 4 hours, UTC
+  workflow_dispatch:                      # manual trigger for testing
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Run tests
+        run: python tests.py
+
+  run:
+    runs-on: ubuntu-latest
+    needs: test                          # don't run if tests fail
+
+    permissions:
+      contents: write                    # needed to read/write state.json on the state branch
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      - name: Install dependencies
+        run: pip install requests pyyaml
+
+      - name: Run Tripwire
+        env:
+          YNAB_TOKEN: ${{ secrets.YNAB_TOKEN }}
+          PUSHOVER_API_TOKEN: ${{ secrets.PUSHOVER_API_TOKEN }}
+          PUSHOVER_USER_KEYS: ${{ secrets.PUSHOVER_USER_KEYS }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+        run: python alerts.py
+
+      - name: Notify on failure
+        if: failure()
+        uses: actions/slack-notify@v1
+        with:
+          # This step is a placeholder — see README for how to wire up
+          # failure notifications via Pushover or email. The key point is
+          # that this step only runs on failure (if: failure()), so a
+          # crashed run doesn't silently disappear.
+          status: "failure"
+        continue-on-error: true          # don't let the notify step itself break the workflow
