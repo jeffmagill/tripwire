@@ -204,12 +204,12 @@ def prune_old_months(state: dict, now: datetime | None = None) -> None:
 
 def fetch_categories(budget_id: str, month: str) -> list[dict]:
     """Fetch all categories for a given budget and month."""
-    url = f"{YNAB_BASE}/budgets/{budget_id}/months/{month}/categories"
+    url = f"{YNAB_BASE}/budgets/{budget_id}/months/{month}"
     headers = {"Authorization": f"Bearer {YNAB_TOKEN}"}
     log.debug("Fetching categories: %s", url)
     r = requests.get(url, headers=headers)
     r.raise_for_status()
-    categories = r.json()["data"]["categories"]
+    categories = r.json()["data"]["month"]["categories"]
     log.info("Fetched %d categories from YNAB for %s", len(categories), month)
     return categories
 
