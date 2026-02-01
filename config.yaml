@@ -1,16 +1,26 @@
-# ynab-alerts config
+# tripwire config
 # ---------------------
 # Each category block maps to a category in your YNAB budget.
-# goal_id: the YNAB category ID (grab from YNAB API or URL when viewing the category)
-# enabled: set to false to skip the category entirely
+#   goal_id: the YNAB category ID (grab from YNAB API or URL when viewing the category)
+#   enabled: set to false to skip the category entirely
+#
 # rules: list of alert rules. Each rule has:
-#   type: goal_threshold | historical_average | pacing (pacing and historical_average TBD)
+#   type: goal_threshold | pacing (historical_average TBD)
+#   min_hours_between_alerts: minimum hours between repeated alerts for the same trigger.
+#       For goal_threshold this effectively means "fire once" if set high (e.g. 744 = 31 days).
+#       For pacing this is the re-alert cadence — e.g. 24 means once per day.
 #   triggers: list of threshold + severity pairs
-#     at: threshold expression
-#           "$X"  = alert when dollars remaining drops to X or below
-#           "X%"  = alert when percentage of goal spent reaches X or above
+#     at: threshold expression. Syntax depends on rule type:
+#           goal_threshold:
+#             "$X remaining"  = alert when dollars remaining drops to X or below
+#             "X%"            = alert when percentage of goal spent reaches X or above
+#           pacing:
+#             "X% over"       = alert when projected end-of-month spend exceeds goal by X%+
 #     severity: warning | urgent
-#   once_per_trigger: if true, each trigger fires at most once per month
+#
+# pacing-only fields:
+#   warm_up_hours: don't evaluate pacing until this many hours into the month.
+#       Prevents noisy false positives from single early transactions.
 
 budget_id: "your-budget-id-here"
 
@@ -20,34 +30,52 @@ categories:
     enabled: true
     rules:
       - type: goal_threshold
+        min_hours_between_alerts: 744     # effectively once per month (31 days)
         triggers:
           - at: "75%"
             severity: warning
           - at: "90%"
             severity: urgent
-        once_per_trigger: true
+
+      - type: pacing
+        warm_up_hours: 72                 # don't evaluate until day 3
+        min_hours_between_alerts: 24      # re-alert at most once per day
+        triggers:
+          - at: "5% over"
+            severity: warning
+          - at: "20% over"
+            severity: urgent
 
   Dining Out:
     goal_id: "your-category-id-here"
     enabled: true
     rules:
       - type: goal_threshold
+        min_hours_between_alerts: 744
         triggers:
           - at: "80%"
             severity: warning
           - at: "95%"
             severity: urgent
-        once_per_trigger: true
+
+      - type: pacing
+        warm_up_hours: 72
+        min_hours_between_alerts: 24
+        triggers:
+          - at: "10% over"
+            severity: warning
+          - at: "25% over"
+            severity: urgent
 
   Car Maintenance:
     goal_id: "your-category-id-here"
     enabled: true
     rules:
       - type: goal_threshold
+        min_hours_between_alerts: 744
         triggers:
           - at: "$200 remaining"
             severity: warning
-        once_per_trigger: true
 
   # Example: category with alerts disabled this month
   Vacation:
@@ -55,7 +83,7 @@ categories:
     enabled: false
     rules:
       - type: goal_threshold
+        min_hours_between_alerts: 744
         triggers:
           - at: "80%"
             severity: warning
-        once_per_trigger: true
