@@ -1,10 +1,18 @@
 # tripwire config
 # ---------------------
-# Each category block maps to a category in your YNAB budget.
-#   goal_id: the YNAB category ID (grab from YNAB API or URL when viewing the category)
-#   enabled: set to false to skip the category entirely
+# Categories are matched by name to your YNAB budget categories.
+# No need to look up category IDs anymore!
 #
-# rules: list of alert rules. Each rule has:
+# Auto-alerts:
+#   enabled: set to true to automatically create alerts for all YNAB categories with goals
+#   exclude: list of category names to skip even if they have goals
+#   rules: default alert rules to apply to auto-detected categories
+#
+# Explicit category configuration (optional if auto_alerts is enabled):
+#   enabled: set to false to temporarily disable alerts for this category
+#   rules: list of alert rules (same structure as auto_alerts rules)
+#
+# Rule types:
 #   type: goal_threshold | pacing (historical_average TBD)
 #   min_hours_between_alerts: minimum hours between repeated alerts for the same trigger.
 #       For goal_threshold this effectively means "fire once" if set high (e.g. 744 = 31 days).
@@ -24,17 +32,31 @@
 
 budget_id: "${YNAB_BUDGET_ID}"
 
+# Auto-detect categories with goals and apply default alert rules
+auto_alerts:
+  enabled: true
+  exclude: []  # e.g. ["Emergency Fund", "Vacation"] to skip specific categories
+  rules:
+    - type: goal_threshold
+      min_hours_between_alerts: 744  # once per month
+      triggers:
+        - at: "75%"
+          severity: warning
+        - at: "90%"
+          severity: urgent
+
+# Explicit category configuration (overrides auto_alerts for these categories)
 categories:
+  # Example: custom thresholds for groceries
   Groceries:
-    goal_id: "your-category-id-here"
     enabled: true
     rules:
       - type: goal_threshold
-        min_hours_between_alerts: 744     # effectively once per month (31 days)
+        min_hours_between_alerts: 744
         triggers:
-          - at: "75%"
+          - at: "50%"
             severity: warning
-          - at: "90%"
+          - at: "80%"
             severity: urgent
 
       - type: pacing
@@ -46,29 +68,8 @@ categories:
           - at: "20% over"
             severity: urgent
 
-  Dining Out:
-    goal_id: "your-category-id-here"
-    enabled: true
-    rules:
-      - type: goal_threshold
-        min_hours_between_alerts: 744
-        triggers:
-          - at: "80%"
-            severity: warning
-          - at: "95%"
-            severity: urgent
-
-      - type: pacing
-        warm_up_hours: 72
-        min_hours_between_alerts: 24
-        triggers:
-          - at: "10% over"
-            severity: warning
-          - at: "25% over"
-            severity: urgent
-
-  Car Maintenance:
-    goal_id: "your-category-id-here"
+  # Example: dollar-based threshold
+  "Car Maintenance":
     enabled: true
     rules:
       - type: goal_threshold
@@ -77,13 +78,7 @@ categories:
           - at: "$200 remaining"
             severity: warning
 
-  # Example: category with alerts disabled this month
-  Vacation:
-    goal_id: "your-category-id-here"
-    enabled: false
-    rules:
-      - type: goal_threshold
-        min_hours_between_alerts: 744
-        triggers:
-          - at: "80%"
-            severity: warning
+  # Example: temporarily disabled category
+  # Vacation:
+  #   enabled: false
+  #   rules: []

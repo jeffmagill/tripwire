@@ -41,28 +41,35 @@ Go to your repo → Settings → Secrets and Variables → Actions. Add:
 
 The `budget_id` field uses environment variable substitution — the default
 `"${YNAB_BUDGET_ID}"` will be replaced at runtime with the value from your
-repository secret. **You don't need to change this unless you want to hardcode
-the ID directly.**
+repository secret.
 
-You can also use environment variables for category IDs if you prefer:
+**Categories are matched by name** (not ID!) so configuration is simple:
 
 ```yaml
 categories:
-  Groceries:
-    goal_id: "${YNAB_GROCERIES_ID}"  # reads from environment
-  Dining Out:
-    goal_id: "abc-123-def-456"        # or hardcode directly
+  Groceries:      # matches your YNAB category named "Groceries"
+    rules: [...]
+  "Dining Out":   # use quotes for names with spaces
+    rules: [...]
 ```
 
-To find your budget ID and category IDs, use the YNAB API:
+**Auto-alerts** (recommended): Enable auto-detection to automatically alert on ALL categories that have goals set in YNAB:
 
-```bash
-# List budgets
-curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets
-
-# List categories for a budget
-curl -H "Authorization: Bearer YOUR_TOKEN" https://api.ynab.com/v1/budgets/YOUR_BUDGET_ID/categories
+```yaml
+auto_alerts:
+  enabled: true
+  exclude: ["Emergency Fund"]  # optional: skip specific categories
+  rules:
+    - type: goal_threshold
+      min_hours_between_alerts: 744
+      triggers:
+        - at: "75%"
+          severity: warning
+        - at: "90%"
+          severity: urgent
 ```
+
+With auto-alerts enabled, you only need to explicitly configure categories when you want custom thresholds that differ from the defaults.
 
 Environment variable syntax: use `${VAR}` format (bare `$VAR` is not supported to avoid conflicts with dollar amounts in threshold expressions).
 
@@ -92,6 +99,34 @@ All rule types use `min_hours_between_alerts` to control how often a given
 trigger can fire. For `goal_threshold` rules, setting this high (e.g. `744` =
 31 days) effectively means "fire once per month." For `pacing` rules, a lower
 value like `24` acts as a daily re-alert if the category stays over pace.
+
+## Auto-alerts
+
+Tripwire can automatically detect all YNAB categories that have goals and apply
+default alert rules to them. Enable this in `config.yaml`:
+
+```yaml
+auto_alerts:
+  enabled: true
+  exclude: ["Emergency Fund", "Savings"]  # optional: skip specific categories
+  rules:
+    - type: goal_threshold
+      min_hours_between_alerts: 744
+      triggers:
+        - at: "75%"
+          severity: warning
+        - at: "90%"
+          severity: urgent
+```
+
+With auto-alerts:
+- Any category in YNAB with a goal automatically gets the default alert rules
+- Categories in the `exclude` list are skipped
+- Explicitly configured categories (in the `categories` section) override auto-detected ones
+- Categories without goals are never auto-detected
+
+This is the recommended approach — set reasonable defaults via `auto_alerts`, then only
+explicitly configure categories that need custom thresholds.
 
 ## Pacing warm-up
 

@@ -215,8 +215,8 @@ def fetch_categories(budget_id: str, month: str) -> list[dict]:
 
 
 def build_category_map(categories: list[dict]) -> dict[str, dict]:
-    """Key categories by ID for fast lookup."""
-    return {cat["id"]: cat for cat in categories}
+    """Key categories by name for fast lookup."""
+    return {cat["name"]: cat for cat in categories}
 
 
 # ---------------------------------------------------------------------------
@@ -335,6 +335,11 @@ def evaluate_goal_threshold_rule(
     now: datetime,
 ) -> list[Firing]:
     """Evaluate a goal_threshold rule against a YNAB category. Returns all firings."""
+    # Check if category has a goal - warn if not
+    if ynab_category.get("goal_target") is None:
+        log.warning("SKIP (no goal): %s — goal_threshold rule configured but category has no goal in YNAB", category_name)
+        return []
+
     min_hours = rule.get("min_hours_between_alerts", 744)
     firings = []
 
@@ -510,6 +515,61 @@ def send_alert(firing: Firing) -> None:
 
 
 # ---------------------------------------------------------------------------
+# Auto-alerts: automatically create alert rules for categories with goals
+# ---------------------------------------------------------------------------
+
+def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
+    """
+    Build the final category configuration by merging explicit config with auto-detected
+    categories (if auto_alerts is enabled).
+
+    Returns a dict of {category_name: category_config}
+    """
+    final_categories = dict(config.get("categories", {}))
+
+    auto_alerts_config = config.get("auto_alerts", {})
+    if not auto_alerts_config.get("enabled", False):
+        log.debug("Auto-alerts disabled")
+        return final_categories
+
+    exclude_list = set(auto_alerts_config.get("exclude", []))
+    default_rules = auto_alerts_config.get("rules", [])
+
+    if not default_rules:
+        log.warning("Auto-alerts enabled but no default rules defined — skipping auto-detection")
+        return final_categories
+
+    auto_detected = 0
+    for cat_name, ynab_cat in cat_map.items():
+        # Skip if already explicitly configured
+        if cat_name in final_categories:
+            continue
+
+        # Skip if in exclude list
+        if cat_name in exclude_list:
+            log.debug("Auto-alerts: skipping excluded category '%s'", cat_name)
+            continue
+
+        # Skip if no goal
+        if ynab_cat.get("goal_target") is None:
+            continue
+
+        # Add category with auto-detected rules
+        final_categories[cat_name] = {
+            "enabled": True,
+            "rules": default_rules,
+            "_auto_detected": True,  # marker for logging
+        }
+        auto_detected += 1
+        log.debug("Auto-alerts: added category '%s' with default rules", cat_name)
+
+    if auto_detected > 0:
+        log.info("Auto-alerts: detected %d categories with goals (not explicitly configured)", auto_detected)
+
+    return final_categories
+
+
+# ---------------------------------------------------------------------------
 # Main
 # ---------------------------------------------------------------------------
 
@@ -533,16 +593,18 @@ def main():
     state_dirty = False
     total_firings = 0
 
+    # Build final category configuration (explicit + auto-detected)
+    final_categories = build_final_category_config(config, cat_map)
+
     # Evaluate and act
-    for cat_name, cat_config in config["categories"].items():
+    for cat_name, cat_config in final_categories.items():
         if not cat_config.get("enabled", True):
             log.debug("SKIP (disabled): %s", cat_name)
             continue
 
-        goal_id = cat_config["goal_id"]
-        ynab_category = cat_map.get(goal_id)
+        ynab_category = cat_map.get(cat_name)
         if ynab_category is None:
-            log.warning("Category '%s' (goal_id: %s) not found in YNAB for %s — skipping", cat_name, goal_id, month_str)
+            log.warning("Category '%s' not found in YNAB for %s — skipping", cat_name, month_str)
             continue
 
         firings = evaluate_category(cat_name, cat_config, ynab_category, state, now)

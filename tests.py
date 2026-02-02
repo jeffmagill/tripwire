@@ -32,6 +32,7 @@ from alerts import (
     current_month_key,
     # Config
     load_config,
+    build_final_category_config,
     # Types
     Firing,
 )
@@ -65,11 +66,67 @@ def april(day: int, hour: int = 12) -> datetime:
 def test_config_loads():
     cfg = load_config()
     assert "budget_id" in cfg
-    assert len(cfg["categories"]) == 4
+    assert "auto_alerts" in cfg
+    assert len(cfg["categories"]) >= 2  # At least Groceries and Car Maintenance
     for name, cat in cfg["categories"].items():
         for rule in cat.get("rules", []):
             assert "min_hours_between_alerts" in rule, f"{name}: missing min_hours_between_alerts"
             assert "once_per_trigger" not in rule,     f"{name}: stale once_per_trigger still present"
+
+
+def test_auto_alerts_disabled():
+    """When auto_alerts is disabled, only explicit categories are returned."""
+    config = {"categories": {"Groceries": {"rules": []}}, "auto_alerts": {"enabled": False}}
+    cat_map = {
+        "Groceries": {"goal_target": 100000},
+        "Dining Out": {"goal_target": 50000},  # has goal but should not be auto-added
+    }
+    final = build_final_category_config(config, cat_map)
+    assert len(final) == 1
+    assert "Groceries" in final
+    assert "Dining Out" not in final
+
+
+def test_auto_alerts_enabled():
+    """When auto_alerts is enabled, categories with goals are auto-detected."""
+    config = {
+        "categories": {"Groceries": {"rules": []}},
+        "auto_alerts": {
+            "enabled": True,
+            "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
+        },
+    }
+    cat_map = {
+        "Groceries": {"goal_target": 100000},  # explicit, should not be duplicated
+        "Dining Out": {"goal_target": 50000},  # has goal, should be auto-added
+        "Vacation": {"goal_target": None},     # no goal, should not be added
+    }
+    final = build_final_category_config(config, cat_map)
+    assert len(final) == 2
+    assert "Groceries" in final
+    assert "Dining Out" in final
+    assert "Vacation" not in final
+    assert final["Dining Out"]["_auto_detected"] is True
+
+
+def test_auto_alerts_exclude_list():
+    """Categories in the exclude list are not auto-detected."""
+    config = {
+        "categories": {},
+        "auto_alerts": {
+            "enabled": True,
+            "exclude": ["Dining Out"],
+            "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
+        },
+    }
+    cat_map = {
+        "Groceries": {"goal_target": 100000},
+        "Dining Out": {"goal_target": 50000},  # excluded
+    }
+    final = build_final_category_config(config, cat_map)
+    assert len(final) == 1
+    assert "Groceries" in final
+    assert "Dining Out" not in final
 
 
 # ---------------------------------------------------------------------------
