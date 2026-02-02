@@ -579,19 +579,29 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
         return final_categories
 
     auto_detected = 0
+    scanned = 0
+    skipped_no_budget = 0
+    skipped_explicit = 0
+    skipped_excluded = 0
+
     for cat_name, ynab_cat in cat_map.items():
+        scanned += 1
+
         # Skip if already explicitly configured
         if cat_name in final_categories:
+            skipped_explicit += 1
             continue
 
         # Skip if in exclude list
         if cat_name in exclude_list:
+            skipped_excluded += 1
             log.debug("Auto-alerts: skipping excluded category '%s'", cat_name)
             continue
 
         # Skip if no budgeted amount or zero budgeted
         budgeted = ynab_cat.get("budgeted", 0)
         if budgeted is None or budgeted == 0:
+            skipped_no_budget += 1
             continue
 
         # Add category with auto-detected rules
@@ -604,8 +614,11 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
         auto_detected += 1
         log.debug("Auto-alerts: added category '%s' with default rules", cat_name)
 
-    if auto_detected > 0:
-        log.info("Auto-alerts: detected %d categories with budgeted amounts (not explicitly configured)", auto_detected)
+    log.info(
+        "Auto-alerts: scanned %d categories → detected %d with budgeted amounts | "
+        "skipped: %d explicit, %d excluded, %d no budget",
+        scanned, auto_detected, skipped_explicit, skipped_excluded, skipped_no_budget
+    )
 
     return final_categories
 
