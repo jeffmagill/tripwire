@@ -262,7 +262,7 @@ def evaluate_goal_threshold(category: dict, trigger: dict) -> bool:
     trigger: a single trigger dict, e.g. {at: "75%", severity: "warning"}
     """
     goal_target = category.get("goal_target")
-    if goal_target is None:
+    if goal_target is None or goal_target == 0:
         return False
 
     activity = category.get("activity", 0)
@@ -271,7 +271,7 @@ def evaluate_goal_threshold(category: dict, trigger: dict) -> bool:
     threshold_type, threshold_value = parse_threshold(trigger["at"])
 
     if threshold_type == "percent_spent":
-        percent_spent = (activity / goal_target) * 100 if goal_target != 0 else 100.0
+        percent_spent = (activity / goal_target) * 100
         return percent_spent >= threshold_value
 
     elif threshold_type == "dollars_remaining":
@@ -335,8 +335,9 @@ def evaluate_goal_threshold_rule(
     now: datetime,
 ) -> list[Firing]:
     """Evaluate a goal_threshold rule against a YNAB category. Returns all firings."""
-    # Check if category has a goal - warn if not
-    if ynab_category.get("goal_target") is None:
+    # Check if category has a meaningful goal - warn if not
+    goal_target = ynab_category.get("goal_target")
+    if goal_target is None or goal_target == 0:
         log.warning("SKIP (no goal): %s — goal_threshold rule configured but category has no goal in YNAB", category_name)
         return []
 
@@ -550,8 +551,9 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
             log.debug("Auto-alerts: skipping excluded category '%s'", cat_name)
             continue
 
-        # Skip if no goal
-        if ynab_cat.get("goal_target") is None:
+        # Skip if no goal or zero goal
+        goal_target = ynab_cat.get("goal_target")
+        if goal_target is None or goal_target == 0:
             continue
 
         # Add category with auto-detected rules

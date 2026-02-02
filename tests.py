@@ -129,6 +129,27 @@ def test_auto_alerts_exclude_list():
     assert "Dining Out" not in final
 
 
+def test_auto_alerts_skips_zero_goals():
+    """Categories with zero or null goals are not auto-detected."""
+    config = {
+        "categories": {},
+        "auto_alerts": {
+            "enabled": True,
+            "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
+        },
+    }
+    cat_map = {
+        "Groceries": {"goal_target": 100000},   # valid goal
+        "Clothing": {"goal_target": 0},         # zero goal - should skip
+        "Vacation": {"goal_target": None},      # no goal - should skip
+    }
+    final = build_final_category_config(config, cat_map)
+    assert len(final) == 1
+    assert "Groceries" in final
+    assert "Clothing" not in final  # zero goal should be skipped
+    assert "Vacation" not in final  # null goal should be skipped
+
+
 # ---------------------------------------------------------------------------
 # 2. Threshold parsing
 # ---------------------------------------------------------------------------
@@ -190,9 +211,13 @@ def test_goal_threshold_no_goal():
 
 
 def test_goal_threshold_zero_goal():
-    # Zero goal_target: percent_spent should be 100% (clamped), not a division error
+    # Zero goal is meaningless - treat same as no goal
     cat = make_ynab_category(goal_target=0, activity=0, balance=0)
-    assert evaluate_goal_threshold(cat, {"at": "50%"}) == True
+    assert evaluate_goal_threshold(cat, {"at": "50%"}) == False
+    assert evaluate_goal_threshold(cat, {"at": "75%"}) == False
+    # Even with activity, zero goal should never trigger
+    cat_with_activity = make_ynab_category(goal_target=0, activity=100000, balance=0)
+    assert evaluate_goal_threshold(cat_with_activity, {"at": "50%"}) == False
 
 
 # ---------------------------------------------------------------------------
@@ -365,6 +390,18 @@ def test_goal_threshold_rule_no_goal_returns_empty():
     }
     firings = evaluate_goal_threshold_rule("Groceries", rule, cat, {}, april(15))
     assert len(firings) == 0
+
+
+def test_goal_threshold_rule_zero_goal_returns_empty():
+    """Zero goal should be treated like no goal - return empty and warn."""
+    cat = make_ynab_category(goal_target=0, activity=100000, balance=0)
+    rule = {
+        "type": "goal_threshold",
+        "min_hours_between_alerts": 744,
+        "triggers": [{"at": "75%", "severity": "warning"}],
+    }
+    firings = evaluate_goal_threshold_rule("Clothing", rule, cat, {}, april(15))
+    assert len(firings) == 0  # Should not trigger on zero goal
 
 
 # ---------------------------------------------------------------------------
