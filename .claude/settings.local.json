@@ -2,7 +2,13 @@
   "permissions": {
     "allow": [
       "Bash(python3:*)",
-      "WebFetch(domain:api.ynab.com)"
+      "WebFetch(domain:api.ynab.com)",
+      "Bash(python tests.py:*)",
+      "Bash(where:*)",
+      "Bash(py:*)",
+      "Bash(ls -la \"C:\\\\Program Files\\\\Python\"*)",
+      "Bash(ls -la \"C:\\\\Python\"*)",
+      "Bash(wsl python3:*)"
     ]
   }
 }

@@ -42,15 +42,22 @@ from alerts import (
 # Helpers
 # ---------------------------------------------------------------------------
 
-def make_ynab_category(goal_target: int | None = 1000000, activity: int = 0, balance: int | None = None, cat_id: str = "cat-1") -> dict:
-    """Build a minimal YNAB category dict. balance defaults to goal_target - activity."""
+def make_ynab_category(budgeted: int | None = 1000000, activity: int = 0, balance: int | None = None, cat_id: str = "cat-1", goal_target: int | None = None) -> dict:
+    """Build a minimal YNAB category dict.
+
+    budgeted: amount assigned this month (in milliunits) - used for spending_limit: auto
+    activity: transaction activity (negative for spending/outflows, positive for income)
+    balance: category balance (defaults to budgeted + activity)
+    goal_target: optional YNAB goal (for savings goals, not spending limits)
+    """
     if balance is None:
-        balance = (goal_target or 0) - activity
+        balance = (budgeted or 0) + activity
     return {
         "id": cat_id,
-        "goal_target": goal_target,
+        "budgeted": budgeted,
         "activity": activity,
         "balance": balance,
+        "goal_target": goal_target,
     }
 
 
@@ -78,8 +85,8 @@ def test_auto_alerts_disabled():
     """When auto_alerts is disabled, only explicit categories are returned."""
     config = {"categories": {"Groceries": {"rules": []}}, "auto_alerts": {"enabled": False}}
     cat_map = {
-        "Groceries": {"goal_target": 100000},
-        "Dining Out": {"goal_target": 50000},  # has goal but should not be auto-added
+        "Groceries": {"budgeted": 100000},
+        "Dining Out": {"budgeted": 50000},  # has budgeted but should not be auto-added
     }
     final = build_final_category_config(config, cat_map)
     assert len(final) == 1
@@ -88,18 +95,19 @@ def test_auto_alerts_disabled():
 
 
 def test_auto_alerts_enabled():
-    """When auto_alerts is enabled, categories with goals are auto-detected."""
+    """When auto_alerts is enabled, categories with budgeted amounts are auto-detected."""
     config = {
         "categories": {"Groceries": {"rules": []}},
         "auto_alerts": {
             "enabled": True,
+            "spending_limit": "auto",
             "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
         },
     }
     cat_map = {
-        "Groceries": {"goal_target": 100000},  # explicit, should not be duplicated
-        "Dining Out": {"goal_target": 50000},  # has goal, should be auto-added
-        "Vacation": {"goal_target": None},     # no goal, should not be added
+        "Groceries": {"budgeted": 100000},  # explicit, should not be duplicated
+        "Dining Out": {"budgeted": 50000},  # has budgeted, should be auto-added
+        "Vacation": {"budgeted": None},     # no budgeted, should not be added
     }
     final = build_final_category_config(config, cat_map)
     assert len(final) == 2
@@ -107,6 +115,7 @@ def test_auto_alerts_enabled():
     assert "Dining Out" in final
     assert "Vacation" not in final
     assert final["Dining Out"]["_auto_detected"] is True
+    assert final["Dining Out"]["spending_limit"] == "auto"
 
 
 def test_auto_alerts_exclude_list():
@@ -116,12 +125,13 @@ def test_auto_alerts_exclude_list():
         "auto_alerts": {
             "enabled": True,
             "exclude": ["Dining Out"],
+            "spending_limit": "auto",
             "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
         },
     }
     cat_map = {
-        "Groceries": {"goal_target": 100000},
-        "Dining Out": {"goal_target": 50000},  # excluded
+        "Groceries": {"budgeted": 100000},
+        "Dining Out": {"budgeted": 50000},  # excluded
     }
     final = build_final_category_config(config, cat_map)
     assert len(final) == 1
@@ -129,25 +139,26 @@ def test_auto_alerts_exclude_list():
     assert "Dining Out" not in final
 
 
-def test_auto_alerts_skips_zero_goals():
-    """Categories with zero or null goals are not auto-detected."""
+def test_auto_alerts_skips_zero_budgeted():
+    """Categories with zero or null budgeted amounts are not auto-detected."""
     config = {
         "categories": {},
         "auto_alerts": {
             "enabled": True,
+            "spending_limit": "auto",
             "rules": [{"type": "goal_threshold", "min_hours_between_alerts": 744, "triggers": []}],
         },
     }
     cat_map = {
-        "Groceries": {"goal_target": 100000},   # valid goal
-        "Clothing": {"goal_target": 0},         # zero goal - should skip
-        "Vacation": {"goal_target": None},      # no goal - should skip
+        "Groceries": {"budgeted": 100000},   # valid budgeted amount
+        "Clothing": {"budgeted": 0},         # zero budgeted - should skip
+        "Vacation": {"budgeted": None},      # no budgeted - should skip
     }
     final = build_final_category_config(config, cat_map)
     assert len(final) == 1
     assert "Groceries" in final
-    assert "Clothing" not in final  # zero goal should be skipped
-    assert "Vacation" not in final  # null goal should be skipped
+    assert "Clothing" not in final  # zero budgeted should be skipped
+    assert "Vacation" not in final  # null budgeted should be skipped
 
 
 # ---------------------------------------------------------------------------
@@ -190,34 +201,40 @@ def test_parse_threshold_invalid():
 # ---------------------------------------------------------------------------
 
 def test_goal_threshold_percent_spent():
-    # 800 of 1000 spent = 80%
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
-    assert evaluate_goal_threshold(cat, {"at": "75%"})  == True   # 80 >= 75
-    assert evaluate_goal_threshold(cat, {"at": "80%"})  == True   # 80 >= 80
-    assert evaluate_goal_threshold(cat, {"at": "81%"})  == False  # 80 < 81
+    # $800 spent of $1000 limit = 80%
+    # Activity is NEGATIVE for spending (outflows)
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
+    assert evaluate_goal_threshold(cat, {"at": "75%"}, cat_config)  == True   # 80 >= 75
+    assert evaluate_goal_threshold(cat, {"at": "80%"}, cat_config)  == True   # 80 >= 80
+    assert evaluate_goal_threshold(cat, {"at": "81%"}, cat_config)  == False  # 80 < 81
 
 
 def test_goal_threshold_dollars_remaining():
-    # balance = $200 (200,000 milliunits)
-    cat = make_ynab_category(goal_target=1000000, activity=800000, balance=200000)
-    assert evaluate_goal_threshold(cat, {"at": "$200 remaining"}) == True   # 200 <= 200
-    assert evaluate_goal_threshold(cat, {"at": "$250 remaining"}) == True   # 200 <= 250
-    assert evaluate_goal_threshold(cat, {"at": "$150 remaining"}) == False  # 200 > 150
+    # $1000 budgeted, $800 spent (negative activity), $200 remaining
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
+    assert evaluate_goal_threshold(cat, {"at": "$200 remaining"}, cat_config) == True   # 200 <= 200
+    assert evaluate_goal_threshold(cat, {"at": "$250 remaining"}, cat_config) == True   # 200 <= 250
+    assert evaluate_goal_threshold(cat, {"at": "$150 remaining"}, cat_config) == False  # 200 > 150
 
 
-def test_goal_threshold_no_goal():
-    cat = make_ynab_category(goal_target=None, activity=500000, balance=0)
-    assert evaluate_goal_threshold(cat, {"at": "50%"}) == False
+def test_goal_threshold_no_spending_limit():
+    # No budgeted amount, no spending limit
+    cat = make_ynab_category(budgeted=None, activity=-500000)
+    cat_config = {"spending_limit": "auto"}
+    assert evaluate_goal_threshold(cat, {"at": "50%"}, cat_config) == False
 
 
-def test_goal_threshold_zero_goal():
-    # Zero goal is meaningless - treat same as no goal
-    cat = make_ynab_category(goal_target=0, activity=0, balance=0)
-    assert evaluate_goal_threshold(cat, {"at": "50%"}) == False
-    assert evaluate_goal_threshold(cat, {"at": "75%"}) == False
-    # Even with activity, zero goal should never trigger
-    cat_with_activity = make_ynab_category(goal_target=0, activity=100000, balance=0)
-    assert evaluate_goal_threshold(cat_with_activity, {"at": "50%"}) == False
+def test_goal_threshold_zero_spending_limit():
+    # Zero spending limit is meaningless - treat same as no spending limit
+    cat = make_ynab_category(budgeted=0, activity=0)
+    cat_config = {"spending_limit": "auto"}
+    assert evaluate_goal_threshold(cat, {"at": "50%"}, cat_config) == False
+    assert evaluate_goal_threshold(cat, {"at": "75%"}, cat_config) == False
+    # Even with activity, zero spending limit should never trigger
+    cat_with_activity = make_ynab_category(budgeted=0, activity=-100000)
+    assert evaluate_goal_threshold(cat_with_activity, {"at": "50%"}, cat_config) == False
 
 
 # ---------------------------------------------------------------------------
@@ -225,58 +242,64 @@ def test_goal_threshold_zero_goal():
 # ---------------------------------------------------------------------------
 
 def test_pacing_over():
-    # April (30 days), day 15, $600 spent, goal $1000
+    # April (30 days), day 15, $600 spent (negative activity), limit $1000
     # projected = 600 * 30/15 = $1200 → 20% over
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     now = april(15)
 
-    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, now)
+    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, cat_config, now)
     assert fired == True
     assert abs(ctx["percent_over"] - 20.0) < 0.01
     assert ctx["days_in_month"] == 30
     assert ctx["days_elapsed"] == 15
 
-    fired, _ = evaluate_pacing(cat, {"at": "20% over"}, now)
+    fired, _ = evaluate_pacing(cat, {"at": "20% over"}, cat_config, now)
     assert fired == True   # exactly 20, >= 20
 
-    fired, _ = evaluate_pacing(cat, {"at": "25% over"}, now)
+    fired, _ = evaluate_pacing(cat, {"at": "25% over"}, cat_config, now)
     assert fired == False  # 20 < 25
 
 
 def test_pacing_on_pace():
-    # $500 by day 15 of 30 → projected = $1000 → 0% over
-    cat = make_ynab_category(goal_target=1000000, activity=500000)
-    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, april(15))
+    # $500 spent by day 15 of 30 → projected = $1000 → 0% over
+    cat = make_ynab_category(budgeted=1000000, activity=-500000)
+    cat_config = {"spending_limit": "auto"}
+    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, cat_config, april(15))
     assert fired == False
     assert abs(ctx["percent_over"] - 0.0) < 0.01
 
 
 def test_pacing_under_pace():
-    # $300 by day 15 of 30 → projected = $600 → -40% over (under)
-    cat = make_ynab_category(goal_target=1000000, activity=300000)
-    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, april(15))
+    # $300 spent by day 15 of 30 → projected = $600 → -40% over (under)
+    cat = make_ynab_category(budgeted=1000000, activity=-300000)
+    cat_config = {"spending_limit": "auto"}
+    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, cat_config, april(15))
     assert fired == False
     assert ctx["percent_over"] < 0
 
 
-def test_pacing_no_goal():
-    cat = make_ynab_category(goal_target=None, activity=500000)
-    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, april(15))
+def test_pacing_no_spending_limit():
+    cat = make_ynab_category(budgeted=None, activity=-500000)
+    cat_config = {"spending_limit": "auto"}
+    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, cat_config, april(15))
     assert fired == False
     assert ctx == {}
 
 
-def test_pacing_zero_goal():
-    cat = make_ynab_category(goal_target=0, activity=500000)
-    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, april(15))
+def test_pacing_zero_spending_limit():
+    cat = make_ynab_category(budgeted=0, activity=-500000)
+    cat_config = {"spending_limit": "auto"}
+    fired, ctx = evaluate_pacing(cat, {"at": "5% over"}, cat_config, april(15))
     assert fired == False
     assert ctx == {}
 
 
 def test_pacing_invalid_trigger_syntax():
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     try:
-        evaluate_pacing(cat, {"at": "75%"}, april(15))  # wrong syntax for pacing
+        evaluate_pacing(cat, {"at": "75%"}, cat_config, april(15))  # wrong syntax for pacing
         assert False, "Should have raised ValueError"
     except ValueError:
         pass
@@ -346,7 +369,8 @@ def test_prune_old_months():
 
 def test_goal_threshold_rule_fires_matching_triggers():
     # 80% spent. Rule has triggers at 75% (should fire) and 90% (should not).
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "goal_threshold",
         "min_hours_between_alerts": 744,
@@ -358,7 +382,7 @@ def test_goal_threshold_rule_fires_matching_triggers():
     state = {}
     now = april(15)
 
-    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, state, now)
+    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, cat_config, state, now)
     assert len(firings) == 1
     assert firings[0].trigger["at"] == "75%"
     assert firings[0].trigger["severity"] == "warning"
@@ -366,7 +390,8 @@ def test_goal_threshold_rule_fires_matching_triggers():
 
 
 def test_goal_threshold_rule_respects_cooldown():
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "goal_threshold",
         "min_hours_between_alerts": 744,
@@ -377,31 +402,33 @@ def test_goal_threshold_rule_respects_cooldown():
     record_firing(state, "Groceries", "75%", now)
 
     # Should not fire again — cooldown active
-    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, state, now)
+    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, cat_config, state, now)
     assert len(firings) == 0
 
 
-def test_goal_threshold_rule_no_goal_returns_empty():
-    cat = make_ynab_category(goal_target=None, activity=800000, balance=0)
+def test_goal_threshold_rule_no_spending_limit_returns_empty():
+    cat = make_ynab_category(budgeted=None, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "goal_threshold",
         "min_hours_between_alerts": 744,
         "triggers": [{"at": "75%", "severity": "warning"}],
     }
-    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, {}, april(15))
+    firings = evaluate_goal_threshold_rule("Groceries", rule, cat, cat_config, {}, april(15))
     assert len(firings) == 0
 
 
-def test_goal_threshold_rule_zero_goal_returns_empty():
-    """Zero goal should be treated like no goal - return empty and warn."""
-    cat = make_ynab_category(goal_target=0, activity=100000, balance=0)
+def test_goal_threshold_rule_zero_spending_limit_returns_empty():
+    """Zero spending limit should be treated like no spending limit - return empty and warn."""
+    cat = make_ynab_category(budgeted=0, activity=-100000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "goal_threshold",
         "min_hours_between_alerts": 744,
         "triggers": [{"at": "75%", "severity": "warning"}],
     }
-    firings = evaluate_goal_threshold_rule("Clothing", rule, cat, {}, april(15))
-    assert len(firings) == 0  # Should not trigger on zero goal
+    firings = evaluate_goal_threshold_rule("Clothing", rule, cat, cat_config, {}, april(15))
+    assert len(firings) == 0  # Should not trigger on zero spending limit
 
 
 # ---------------------------------------------------------------------------
@@ -409,8 +436,9 @@ def test_goal_threshold_rule_zero_goal_returns_empty():
 # ---------------------------------------------------------------------------
 
 def test_pacing_rule_fires_when_over_pace():
-    # April day 15, $600 of $1000 spent → 20% over
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    # April day 15, $600 spent of $1000 limit → 20% over
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "pacing",
         "warm_up_hours": 72,
@@ -424,14 +452,15 @@ def test_pacing_rule_fires_when_over_pace():
     # hours_into_month for april 15 = 14 days * 24 + 12 = 348h, well past warm-up
     hours_into_month = (now - datetime(2026, 4, 1, tzinfo=timezone.utc)).total_seconds() / 3600
 
-    firings = evaluate_pacing_rule("Groceries", rule, cat, {}, now, hours_into_month)
+    firings = evaluate_pacing_rule("Groceries", rule, cat, cat_config, {}, now, hours_into_month)
     assert len(firings) == 1
     assert firings[0].trigger["at"] == "5% over"
     assert firings[0].pacing_context["percent_over"] == pytest_approx(20.0)
 
 
 def test_pacing_rule_blocked_by_warm_up():
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "pacing",
         "warm_up_hours": 72,
@@ -439,12 +468,13 @@ def test_pacing_rule_blocked_by_warm_up():
         "triggers": [{"at": "5% over", "severity": "warning"}],
     }
     # Only 48 hours into the month — warm_up_hours is 72
-    firings = evaluate_pacing_rule("Groceries", rule, cat, {}, april(2, 0), hours_into_month=48.0)
+    firings = evaluate_pacing_rule("Groceries", rule, cat, cat_config, {}, april(2, 0), hours_into_month=48.0)
     assert len(firings) == 0
 
 
 def test_pacing_rule_respects_cooldown():
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "pacing",
         "warm_up_hours": 72,
@@ -456,12 +486,13 @@ def test_pacing_rule_respects_cooldown():
     state = {}
     record_firing(state, "Groceries", "5% over", now)
 
-    firings = evaluate_pacing_rule("Groceries", rule, cat, state, now, hours_into_month)
+    firings = evaluate_pacing_rule("Groceries", rule, cat, cat_config, state, now, hours_into_month)
     assert len(firings) == 0
 
 
 def test_pacing_rule_re_alerts_after_cooldown():
-    cat = make_ynab_category(goal_target=1000000, activity=600000)
+    cat = make_ynab_category(budgeted=1000000, activity=-600000)
+    cat_config = {"spending_limit": "auto"}
     rule = {
         "type": "pacing",
         "warm_up_hours": 72,
@@ -474,7 +505,7 @@ def test_pacing_rule_re_alerts_after_cooldown():
     # Fired 25 hours ago → cooldown expired
     record_firing(state, "Groceries", "5% over", now - timedelta(hours=25))
 
-    firings = evaluate_pacing_rule("Groceries", rule, cat, state, now, hours_into_month)
+    firings = evaluate_pacing_rule("Groceries", rule, cat, cat_config, state, now, hours_into_month)
     assert len(firings) == 1
 
 
@@ -483,20 +514,28 @@ def test_pacing_rule_re_alerts_after_cooldown():
 # ---------------------------------------------------------------------------
 
 def test_evaluate_category_disabled():
-    cat_config = {"goal_id": "cat-1", "enabled": False, "rules": [
-        {"type": "goal_threshold", "min_hours_between_alerts": 744,
-         "triggers": [{"at": "75%", "severity": "warning"}]},
-    ]}
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat_config = {
+        "spending_limit": "auto",
+        "enabled": False,
+        "rules": [
+            {"type": "goal_threshold", "min_hours_between_alerts": 744,
+             "triggers": [{"at": "75%", "severity": "warning"}]},
+        ],
+    }
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
     firings = evaluate_category("Groceries", cat_config, cat, {}, april(15))
     assert len(firings) == 0
 
 
 def test_evaluate_category_unknown_rule_type():
-    cat_config = {"goal_id": "cat-1", "enabled": True, "rules": [
-        {"type": "unknown_future_type", "triggers": [{"at": "75%", "severity": "warning"}]},
-    ]}
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat_config = {
+        "spending_limit": "auto",
+        "enabled": True,
+        "rules": [
+            {"type": "unknown_future_type", "triggers": [{"at": "75%", "severity": "warning"}]},
+        ],
+    }
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
     # Should not crash, just skip
     firings = evaluate_category("Groceries", cat_config, cat, {}, april(15))
     assert len(firings) == 0
@@ -504,9 +543,9 @@ def test_evaluate_category_unknown_rule_type():
 
 def test_evaluate_category_multiple_rules():
     # 80% spent, day 15 of April. Goal threshold at 75% should fire.
-    # Pacing: 800k activity on day 15 of 30 → projected = 1600k → 60% over. "5% over" should fire.
+    # Pacing: 800k spent on day 15 of 30 → projected = 1600k → 60% over. "5% over" should fire.
     cat_config = {
-        "goal_id": "cat-1",
+        "spending_limit": "auto",
         "enabled": True,
         "rules": [
             {
@@ -528,7 +567,7 @@ def test_evaluate_category_multiple_rules():
             },
         ],
     }
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
     firings = evaluate_category("Groceries", cat_config, cat, {}, april(15))
 
     assert len(firings) == 2
@@ -539,13 +578,70 @@ def test_evaluate_category_multiple_rules():
 
 def test_evaluate_category_enabled_defaults_true():
     # No "enabled" key at all — should still evaluate
-    cat_config = {"goal_id": "cat-1", "rules": [
-        {"type": "goal_threshold", "min_hours_between_alerts": 744,
-         "triggers": [{"at": "75%", "severity": "warning"}]},
-    ]}
-    cat = make_ynab_category(goal_target=1000000, activity=800000)
+    cat_config = {
+        "spending_limit": "auto",
+        "rules": [
+            {"type": "goal_threshold", "min_hours_between_alerts": 744,
+             "triggers": [{"at": "75%", "severity": "warning"}]},
+        ],
+    }
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
     firings = evaluate_category("Groceries", cat_config, cat, {}, april(15))
     assert len(firings) == 1
+
+
+# ---------------------------------------------------------------------------
+# 9. spending_limit: auto vs explicit
+# ---------------------------------------------------------------------------
+
+def test_spending_limit_auto_uses_budgeted():
+    """spending_limit: auto should use the budgeted amount from YNAB."""
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": "auto"}
+    # 80% of budgeted amount
+    assert evaluate_goal_threshold(cat, {"at": "75%"}, cat_config) == True
+    assert evaluate_goal_threshold(cat, {"at": "90%"}, cat_config) == False
+
+
+def test_spending_limit_explicit_overrides_budgeted():
+    """Explicit spending_limit should override YNAB budgeted amount."""
+    # Budgeted is $1000, but explicit limit is $500
+    cat = make_ynab_category(budgeted=1000000, activity=-400000)
+    cat_config = {"spending_limit": 500}  # $500 explicit limit
+    # $400 spent of $500 limit = 80%
+    assert evaluate_goal_threshold(cat, {"at": "75%"}, cat_config) == True
+    assert evaluate_goal_threshold(cat, {"at": "90%"}, cat_config) == False
+
+
+def test_spending_limit_explicit_in_pacing():
+    """Explicit spending_limit should work with pacing rules."""
+    # Budgeted is $1000, but explicit limit is $500
+    # Day 15 of April (30 days), $400 spent
+    # Projected: 400 * 30/15 = $800, which is 60% over $500 limit
+    cat = make_ynab_category(budgeted=1000000, activity=-400000)
+    cat_config = {"spending_limit": 500}
+    now = april(15)
+
+    fired, ctx = evaluate_pacing(cat, {"at": "50% over"}, cat_config, now)
+    assert fired == True
+    assert abs(ctx["percent_over"] - 60.0) < 0.01
+
+
+def test_spending_limit_zero_explicit_returns_false():
+    """Explicit spending_limit of 0 should be treated as no limit."""
+    cat = make_ynab_category(budgeted=1000000, activity=-800000)
+    cat_config = {"spending_limit": 0}
+    assert evaluate_goal_threshold(cat, {"at": "75%"}, cat_config) == False
+
+
+def test_spending_limit_missing_with_no_budgeted():
+    """If spending_limit is auto and budgeted is None/0, should not trigger."""
+    cat_no_budgeted = make_ynab_category(budgeted=None, activity=-500000)
+    cat_config = {"spending_limit": "auto"}
+    assert evaluate_goal_threshold(cat_no_budgeted, {"at": "50%"}, cat_config) == False
+
+    cat_zero_budgeted = make_ynab_category(budgeted=0, activity=-500000)
+    assert evaluate_goal_threshold(cat_zero_budgeted, {"at": "50%"}, cat_config) == False
 
 
 # ---------------------------------------------------------------------------

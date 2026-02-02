@@ -84,6 +84,7 @@ class Firing:
     category_name: str
     trigger: dict                      # the trigger block from config, e.g. {at: "75%", severity: "warning"}
     ynab_category: dict                # raw YNAB category object
+    cat_config: dict                   # category config (for spending_limit)
     pacing_context: dict = field(default_factory=dict)  # populated only for pacing rules
 
 
@@ -255,58 +256,84 @@ def milliunits_to_dollars(mu: int) -> float:
     return mu / 1000.0
 
 
-def evaluate_goal_threshold(category: dict, trigger: dict) -> bool:
+def get_spending_limit(cat_config: dict, ynab_category: dict) -> int | None:
+    """
+    Get the spending limit in milliunits from config or YNAB budgeted amount.
+    Returns None if no valid limit is available.
+    """
+    spending_limit_config = cat_config.get("spending_limit", "auto")
+
+    if spending_limit_config == "auto":
+        # Use YNAB budgeted amount
+        budgeted = ynab_category.get("budgeted", 0)
+        if budgeted is None or budgeted <= 0:
+            return None
+        return budgeted
+    elif isinstance(spending_limit_config, (int, float)):
+        # Explicit dollar amount - convert to milliunits
+        return int(spending_limit_config * 1000) if spending_limit_config > 0 else None
+    else:
+        return None
+
+
+def evaluate_goal_threshold(category: dict, trigger: dict, cat_config: dict) -> bool:
     """
     Returns True if the trigger condition is met.
     category: raw YNAB category object for the current month.
     trigger: a single trigger dict, e.g. {at: "75%", severity: "warning"}
+    cat_config: category configuration dict (for spending_limit)
     """
-    goal_target = category.get("goal_target")
-    if goal_target is None or goal_target == 0:
+    spending_limit = get_spending_limit(cat_config, category)
+    if spending_limit is None or spending_limit == 0:
         return False
 
+    # Activity is negative for spending (outflows), positive for income
+    # We want absolute value for spending calculations
     activity = category.get("activity", 0)
-    balance = category.get("balance", 0)
+    spent = abs(activity) if activity < 0 else 0  # only count outflows
 
     threshold_type, threshold_value = parse_threshold(trigger["at"])
 
     if threshold_type == "percent_spent":
-        percent_spent = (activity / goal_target) * 100
+        percent_spent = (spent / spending_limit) * 100
         return percent_spent >= threshold_value
 
     elif threshold_type == "dollars_remaining":
-        return milliunits_to_dollars(balance) <= threshold_value
+        remaining = spending_limit - spent
+        return milliunits_to_dollars(remaining) <= threshold_value
 
     return False
 
 
-def evaluate_pacing(category: dict, trigger: dict, now: datetime) -> tuple[bool, dict]:
+def evaluate_pacing(category: dict, trigger: dict, cat_config: dict, now: datetime) -> tuple[bool, dict]:
     """
     Returns (triggered, context) where context holds the computed pacing figures
     for use in the notification message.
 
     Projection math:
-      expected_spend = goal_target × (days_elapsed / days_in_month)
-      projected_eom  = activity × (days_in_month / days_elapsed)
-      percent_over   = ((projected_eom - goal_target) / goal_target) × 100
+      expected_spend = spending_limit × (days_elapsed / days_in_month)
+      projected_eom  = spent × (days_in_month / days_elapsed)
+      percent_over   = ((projected_eom - spending_limit) / spending_limit) × 100
     """
-    goal_target = category.get("goal_target")
-    if goal_target is None or goal_target == 0:
+    spending_limit = get_spending_limit(cat_config, category)
+    if spending_limit is None or spending_limit == 0:
         return (False, {})
 
+    # Activity is negative for spending (outflows), positive for income
     activity = category.get("activity", 0)
+    spent = abs(activity) if activity < 0 else 0  # only count outflows
 
     year, month = now.year, now.month
     days_in_month = calendar.monthrange(year, month)[1]
     days_elapsed = max(now.day, 1)
 
-    expected_spend = goal_target * (days_elapsed / days_in_month)
-    projected_eom = activity * (days_in_month / days_elapsed)
-    percent_over = ((projected_eom - goal_target) / goal_target) * 100
+    expected_spend = spending_limit * (days_elapsed / days_in_month)
+    projected_eom = spent * (days_in_month / days_elapsed)
+    percent_over = ((projected_eom - spending_limit) / spending_limit) * 100
 
     context = {
         "activity": activity,
-        "goal_target": goal_target,
+        "spending_limit": spending_limit,  # changed from goal_target
         "expected_spend": expected_spend,
         "projected_eom": projected_eom,
         "percent_over": percent_over,
@@ -331,14 +358,15 @@ def evaluate_goal_threshold_rule(
     category_name: str,
     rule: dict,
     ynab_category: dict,
+    cat_config: dict,
     state: dict,
     now: datetime,
 ) -> list[Firing]:
     """Evaluate a goal_threshold rule against a YNAB category. Returns all firings."""
-    # Check if category has a meaningful goal - warn if not
-    goal_target = ynab_category.get("goal_target")
-    if goal_target is None or goal_target == 0:
-        log.warning("SKIP (no goal): %s — goal_threshold rule configured but category has no goal in YNAB", category_name)
+    # Check if category has a meaningful spending limit - warn if not
+    spending_limit = get_spending_limit(cat_config, ynab_category)
+    if spending_limit is None or spending_limit == 0:
+        log.warning("SKIP (no spending limit): %s — goal_threshold rule configured but no spending limit available", category_name)
         return []
 
     min_hours = rule.get("min_hours_between_alerts", 744)
@@ -351,11 +379,12 @@ def evaluate_goal_threshold_rule(
             log.debug("SKIP (cooldown): %s — %s", category_name, trigger_key)
             continue
 
-        if evaluate_goal_threshold(ynab_category, trigger):
+        if evaluate_goal_threshold(ynab_category, trigger, cat_config):
             firings.append(Firing(
                 category_name=category_name,
                 trigger=trigger,
                 ynab_category=ynab_category,
+                cat_config=cat_config,
             ))
         else:
             log.debug("EVAL (not tripped): %s — %s", category_name, trigger_key)
@@ -367,6 +396,7 @@ def evaluate_pacing_rule(
     category_name: str,
     rule: dict,
     ynab_category: dict,
+    cat_config: dict,
     state: dict,
     now: datetime,
     hours_into_month: float,
@@ -389,12 +419,13 @@ def evaluate_pacing_rule(
             log.debug("SKIP (cooldown): %s — %s", category_name, trigger_key)
             continue
 
-        fired, pacing_context = evaluate_pacing(ynab_category, trigger, now)
+        fired, pacing_context = evaluate_pacing(ynab_category, trigger, cat_config, now)
         if fired:
             firings.append(Firing(
                 category_name=category_name,
                 trigger=trigger,
                 ynab_category=ynab_category,
+                cat_config=cat_config,
                 pacing_context=pacing_context,
             ))
         else:
@@ -448,6 +479,7 @@ def evaluate_category(
             category_name=category_name,
             rule=rule,
             ynab_category=ynab_category,
+            cat_config=cat_config,  # added for spending_limit
             state=state,
             now=now,
         )
@@ -467,15 +499,20 @@ def send_alert(firing: Firing) -> None:
     """Send a Pushover notification to all configured user keys."""
     category = firing.ynab_category
     trigger = firing.trigger
-    goal_target = category.get("goal_target", 0)
-    activity = category.get("activity", 0)
-    balance = category.get("balance", 0)
     severity = trigger.get("severity", "warning")
 
-    spent_str = f"${milliunits_to_dollars(activity):.2f}"
-    goal_str = f"${milliunits_to_dollars(goal_target):.2f}"
-    remaining_str = f"${milliunits_to_dollars(balance):.2f}"
-    percent_str = f"{(activity / goal_target * 100):.0f}%" if goal_target else "N/A"
+    # Get spending limit from config
+    spending_limit = get_spending_limit(firing.cat_config, category) or 0
+
+    # Activity is negative for spending (outflows), positive for income
+    activity = category.get("activity", 0)
+    spent = abs(activity) if activity < 0 else 0
+    remaining = spending_limit - spent
+
+    spent_str = f"${milliunits_to_dollars(spent):.2f}"
+    limit_str = f"${milliunits_to_dollars(spending_limit):.2f}"
+    remaining_str = f"${milliunits_to_dollars(remaining):.2f}"
+    percent_str = f"{(spent / spending_limit * 100):.0f}%" if spending_limit else "N/A"
 
     title = f"{'⚠️' if severity == 'warning' else '🔴'} Tripwire: {firing.category_name}"
 
@@ -486,12 +523,12 @@ def send_alert(firing: Firing) -> None:
         message = (
             f"On pace to overspend.\n"
             f"Spent: {spent_str} (expected by now: {expected_str})\n"
-            f"Projected end of month: {projected_str} vs goal {goal_str} (+{over_str})\n"
+            f"Projected end of month: {projected_str} vs limit {limit_str} (+{over_str})\n"
             f"Trigger: {trigger['at']} [{severity}]"
         )
     else:
         message = (
-            f"Spent {spent_str} of {goal_str} ({percent_str})\n"
+            f"Spent {spent_str} of {limit_str} ({percent_str})\n"
             f"Remaining: {remaining_str}\n"
             f"Trigger: {trigger['at']} [{severity}]"
         )
@@ -516,7 +553,7 @@ def send_alert(firing: Firing) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Auto-alerts: automatically create alert rules for categories with goals
+# Auto-alerts: automatically create alert rules for categories with budgeted amounts
 # ---------------------------------------------------------------------------
 
 def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
@@ -535,6 +572,7 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
 
     exclude_list = set(auto_alerts_config.get("exclude", []))
     default_rules = auto_alerts_config.get("rules", [])
+    default_spending_limit = auto_alerts_config.get("spending_limit", "auto")
 
     if not default_rules:
         log.warning("Auto-alerts enabled but no default rules defined — skipping auto-detection")
@@ -551,14 +589,15 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
             log.debug("Auto-alerts: skipping excluded category '%s'", cat_name)
             continue
 
-        # Skip if no goal or zero goal
-        goal_target = ynab_cat.get("goal_target")
-        if goal_target is None or goal_target == 0:
+        # Skip if no budgeted amount or zero budgeted
+        budgeted = ynab_cat.get("budgeted", 0)
+        if budgeted is None or budgeted == 0:
             continue
 
         # Add category with auto-detected rules
         final_categories[cat_name] = {
             "enabled": True,
+            "spending_limit": default_spending_limit,
             "rules": default_rules,
             "_auto_detected": True,  # marker for logging
         }
@@ -566,7 +605,7 @@ def build_final_category_config(config: dict, cat_map: dict[str, dict]) -> dict:
         log.debug("Auto-alerts: added category '%s' with default rules", cat_name)
 
     if auto_detected > 0:
-        log.info("Auto-alerts: detected %d categories with goals (not explicitly configured)", auto_detected)
+        log.info("Auto-alerts: detected %d categories with budgeted amounts (not explicitly configured)", auto_detected)
 
     return final_categories
 

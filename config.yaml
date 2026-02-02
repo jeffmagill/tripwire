@@ -4,12 +4,13 @@
 # No need to look up category IDs anymore!
 #
 # Auto-alerts:
-#   enabled: set to true to automatically create alerts for all YNAB categories with goals
-#   exclude: list of category names to skip even if they have goals
+#   enabled: set to true to automatically create alerts for all YNAB categories with budgeted amounts
+#   exclude: list of category names to skip even if they have budgeted amounts
 #   rules: default alert rules to apply to auto-detected categories
 #
 # Explicit category configuration (optional if auto_alerts is enabled):
 #   enabled: set to false to temporarily disable alerts for this category
+#   spending_limit: "auto" (use YNAB budgeted amount) or explicit number (e.g. 800 for $800/month)
 #   rules: list of alert rules (same structure as auto_alerts rules)
 #
 # Rule types:
@@ -32,10 +33,11 @@
 
 budget_id: "${YNAB_BUDGET_ID}"
 
-# Auto-detect categories with goals and apply default alert rules
+# Auto-detect categories with budgeted amounts and apply default alert rules
 auto_alerts:
   enabled: true
   exclude: []  # e.g. ["Emergency Fund", "Vacation"] to skip specific categories
+  spending_limit: auto  # default for auto-detected categories
   rules:
     - type: goal_threshold
       min_hours_between_alerts: 744  # once per month
@@ -50,6 +52,7 @@ categories:
   # Example: custom thresholds for groceries
   Groceries:
     enabled: true
+    spending_limit: auto  # use YNAB budgeted amount, or set explicit $ amount (e.g. 800)
     rules:
       - type: goal_threshold
         min_hours_between_alerts: 744
@@ -68,9 +71,10 @@ categories:
           - at: "20% over"
             severity: urgent
 
-  # Example: dollar-based threshold
+  # Example: dollar-based threshold with explicit spending limit
   "Car Maintenance":
     enabled: true
+    spending_limit: 200  # explicit $200/month limit (overrides YNAB budgeted)
     rules:
       - type: goal_threshold
         min_hours_between_alerts: 744
